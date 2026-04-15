@@ -1,0 +1,51 @@
+{
+  "name": "dev-memory",
+  "version": "2.0.0",
+  "description": "Cross-project persistent memory for AI coding assistants via MCP and SQLite",
+  "type": "module",
+  "bin": {
+    "dev-memory": "dist/server.js",
+    "dev-memory-viewer": "dist/viewer.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "dev": "tsc --watch",
+    "viewer": "node dist/viewer.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "context",
+    "memory",
+    "sqlite",
+    "fts5",
+    "coding-assistant",
+    "developer-tools"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CharitharthK/dev-memory"
+  },
+  "bugs": {
+    "url": "https://github.com/CharitharthK/dev-memory/issues"
+  },
+  "homepage": "https://github.com/CharitharthK/dev-memory#readme",
+  "author": "",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.8.0",
+    "zod": "^3.25.11"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "fast-check": "^4.6.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
