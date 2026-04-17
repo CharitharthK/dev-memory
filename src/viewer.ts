@@ -4,21 +4,24 @@
  * Dev Memory Viewer — lightweight web UI for browsing the knowledge base.
  *
  * Usage:
- *   node dist/viewer.js              # starts on http://localhost:3333
- *   node dist/viewer.js --port 8080  # custom port
+ *   npx dev-memory-viewer              # starts on http://localhost:3333
+ *   npx dev-memory-viewer --port 8080  # custom port
+ *   DEV_MEMORY_TOKEN=secret npx dev-memory-viewer  # require ?token=secret
  *
- * Zero new dependencies — uses Node's built-in http module and the
- * existing db.ts layer.
+ * Zero new dependencies — uses Node's built-in http module.
  */
 
 import { createServer } from "node:http";
 import { parse as parseUrl } from "node:url";
+import { randomBytes } from "node:crypto";
 import {
   initDb,
   searchContexts,
   getContextById,
   listProjects,
   getHubStats,
+  listContextHistory,
+  searchSessions,
 } from "./db.js";
 
 const DEFAULT_PORT = 3333;
@@ -32,8 +35,19 @@ function getPort(): number {
   return DEFAULT_PORT;
 }
 
+function getAuthToken(): string | null {
+  // If the user supplied one, honour it. Otherwise, if --no-auth is passed
+  // or we're clearly running in a local dev context, generate one to print.
+  if (process.env.DEV_MEMORY_TOKEN) return process.env.DEV_MEMORY_TOKEN;
+  if (process.argv.includes("--no-auth")) return null;
+  // Generate a per-run token so the viewer is never exposed token-less
+  // by default on a shared machine. Users who don't care can pass --no-auth.
+  return randomBytes(12).toString("hex");
+}
+
 const db = initDb();
 const port = getPort();
+const authToken = getAuthToken();
 
 // ── API helpers ──────────────────────────────────────────────────────
 
@@ -50,23 +64,7 @@ function html(res: import("node:http").ServerResponse, body: string) {
   res.end(body);
 }
 
-// ── Sessions query (not in db.ts exports, add inline) ────────────────
-
-function listSessions(projectName?: string, limit = 50) {
-  let sql = `
-    SELECT s.*, p.name AS project_name
-    FROM sessions s
-    JOIN projects p ON p.id = s.project_id
-  `;
-  const params: unknown[] = [];
-  if (projectName) {
-    sql += " WHERE p.name = ?";
-    params.push(projectName);
-  }
-  sql += " ORDER BY s.created_at DESC LIMIT ?";
-  params.push(limit);
-  return db.prepare(sql).all(...params);
-}
+// ── Sessions query now handled by db.searchSessions ─────────────────
 
 // ── HTTP server ──────────────────────────────────────────────────────
 
@@ -74,6 +72,20 @@ const server = createServer((req, res) => {
   const parsed = parseUrl(req.url ?? "/", true);
   const path = parsed.pathname ?? "/";
   const query = parsed.query;
+
+  // Auth gate. If a token is required and the request doesn't match,
+  // return 401. We accept the token either in the query string (for
+  // easy bookmarks) or in an `x-auth-token` header (for API calls).
+  if (authToken) {
+    const provided =
+      (typeof query.token === "string" ? query.token : undefined) ??
+      (req.headers["x-auth-token"] as string | undefined);
+    if (provided !== authToken) {
+      res.writeHead(401, { "Content-Type": "text/plain" });
+      res.end("Unauthorized — append ?token=... to the URL");
+      return;
+    }
+  }
 
   try {
     // API routes
@@ -92,23 +104,50 @@ const server = createServer((req, res) => {
         project_name: query.project as string | undefined,
         technology: query.technology as string | undefined,
         limit: query.limit ? parseInt(query.limit as string, 10) : 50,
+        include_deleted: query.include_deleted === "1",
       });
       return json(res, results);
     }
 
     if (path.startsWith("/api/contexts/")) {
-      const id = parseInt(path.split("/").pop() ?? "", 10);
+      const parts = path.split("/").filter(Boolean);
+      // /api/contexts/:id              -> full entry
+      // /api/contexts/:id/history      -> edit history
+      const id = parseInt(parts[2] ?? "", 10);
       if (isNaN(id)) return json(res, { error: "Invalid ID" }, 400);
-      const entry = getContextById(db, id);
+
+      if (parts[3] === "history") {
+        const history = listContextHistory(db, id);
+        return json(res, history);
+      }
+
+      const entry = getContextById(db, id, { include_deleted: true });
       if (!entry) return json(res, { error: "Not found" }, 404);
       return json(res, entry);
     }
 
+    if (path === "/api/trash") {
+      const rows = db
+        .prepare(
+          `SELECT c.id, p.name AS project_name, c.title, c.category,
+                  c.tags, c.importance, c.times_used, c.deleted_at,
+                  substr(c.content, 1, 180) AS preview
+           FROM contexts c
+           JOIN projects p ON p.id = c.project_id
+           WHERE c.deleted_at IS NOT NULL
+           ORDER BY c.deleted_at DESC
+           LIMIT 200`
+        )
+        .all();
+      return json(res, rows);
+    }
+
     if (path === "/api/sessions") {
-      const results = listSessions(
-        query.project as string | undefined,
-        query.limit ? parseInt(query.limit as string, 10) : 50
-      );
+      const results = searchSessions(db, {
+        query: query.query as string | undefined,
+        project_name: query.project as string | undefined,
+        limit: query.limit ? parseInt(query.limit as string, 10) : 50,
+      });
       return json(res, results);
     }
 
@@ -128,7 +167,16 @@ const server = createServer((req, res) => {
 server.listen(port, () => {
   console.log(`\n  Dev Memory Viewer`);
   console.log(`  ──────────────────`);
-  console.log(`  http://localhost:${port}\n`);
+  if (authToken) {
+    console.log(`  http://localhost:${port}?token=${authToken}\n`);
+    console.log(
+      `  (auth token generated per run — set DEV_MEMORY_TOKEN to override`
+    );
+    console.log(`   or pass --no-auth to disable)\n`);
+  } else {
+    console.log(`  http://localhost:${port}\n`);
+    console.log(`  (auth disabled — do not expose on a shared machine)\n`);
+  }
 });
 
 // ── Embedded SPA ─────────────────────────────────────────────────────
@@ -500,7 +548,12 @@ const CAT_COLORS = {
 };
 
 async function api(path) {
-  const res = await fetch(path);
+  // Re-use the token from the page URL on every request so the SPA
+  // continues to work when DEV_MEMORY_TOKEN is set.
+  const token = new URLSearchParams(location.search).get('token');
+  const separator = path.includes('?') ? '&' : '?';
+  const url = token ? path + separator + 'token=' + encodeURIComponent(token) : path;
+  const res = await fetch(url);
   return res.json();
 }
 

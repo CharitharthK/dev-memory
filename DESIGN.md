@@ -2,9 +2,9 @@
 
 ## What It Is
 
-dev-memory is a local MCP (Model Context Protocol) server built with Node.js and TypeScript that gives AI coding assistants persistent, cross-project memory. It stores knowledge — patterns, decisions, gotchas, snippets, architecture notes, debug insights, and more — in a single SQLite database and exposes it through 8 MCP tools over STDIO transport.
+dev-memory is a local MCP (Model Context Protocol) server built with Node.js and TypeScript that gives AI coding assistants persistent, cross-project memory. It stores knowledge — patterns, decisions, gotchas, snippets, architecture notes, debug insights, and more — in a single SQLite database and exposes it through **20 MCP tools** over STDIO transport.
 
-Any MCP-compatible client (Claude Desktop, Amazon Q Developer, VS Code with Copilot, Cursor, Amazon Kiro, etc.) can connect to it. You configure the server once per client, and all 8 tools are auto-discovered. The SQLite database at `~/.dev-memory/context.db` is shared across all clients, so knowledge saved from one IDE is available in every other.
+Any MCP-compatible client (Claude Desktop, Amazon Q Developer, VS Code with Copilot, Cursor, Amazon Kiro, etc.) can connect to it. You configure the server once per client, and all 20 tools are auto-discovered. The SQLite database at `~/.dev-memory/context.db` (override with `DEV_MEMORY_DB_PATH`) is shared across all clients, so knowledge saved from one IDE is available in every other.
 
 ## Why It Exists
 
@@ -12,9 +12,11 @@ AI coding assistants lose context between sessions and across projects. dev-memo
 
 - Letting the AI search for previously solved problems before writing new code
 - Automatically saving new learnings (patterns, decisions, gotchas) after solving problems
-- Tracking which knowledge gets reused most (via usage counters)
+- Tracking which knowledge gets reused most (via usage counters on `get_context` only)
 - Logging session activity for work history
 - Maintaining technology stack consistency across projects
+- Preserving edit history so decisions can be audited over time
+- Protecting against data loss via soft-delete + recoverable trash
 
 ## Architecture
 
@@ -24,14 +26,14 @@ MCP Client (IDE / AI Assistant)
 dev-memory Process
   ├── StdioServerTransport (stdin/stdout)
   ├── McpServer (@modelcontextprotocol/sdk)
-  ├── Tool Router → 8 Tool Handlers
+  ├── Tool Router → 20 Tool Handlers
   ├── Zod Validation (types.ts)
-  └── Database Layer (db.ts) → better-sqlite3
+  └── Database Layer (db.ts) → better-sqlite3 + WAL
         ↕
-~/.dev-memory/context.db (SQLite + FTS5)
+~/.dev-memory/context.db (SQLite + FTS5 + history + trash)
 ```
 
-Single process, single database file, no network, no containers. Synchronous SQLite via better-sqlite3 keeps the code simple since MCP tool handlers are request/response.
+Single process, single database file, no network, no containers. Synchronous SQLite via better-sqlite3 keeps the code simple since MCP tool handlers are request/response. WAL journaling means concurrent reads don't block on writes — important when a single MCP session fires multiple tool calls in parallel.
 
 ## Tech Stack
 
@@ -40,10 +42,27 @@ Single process, single database file, no network, no containers. Synchronous SQL
 | Runtime | Node.js ≥ 18 (ESM) |
 | Language | TypeScript (strict mode, ES2022 target, NodeNext modules) |
 | MCP SDK | `@modelcontextprotocol/sdk` |
-| Database | SQLite via `better-sqlite3` |
-| Full-Text Search | SQLite FTS5 (synced via database triggers) |
+| Database | SQLite via `better-sqlite3` (WAL journal mode) |
+| Full-Text Search | SQLite FTS5 with BM25 ranking (synced via triggers) |
+| Versioning | SQLite `BEFORE UPDATE` triggers → `context_history` table |
 | Validation | Zod |
 | Testing | Vitest + fast-check (property-based testing) |
+
+## Data model
+
+**projects** — named workspaces. `(id, name UNIQUE, tech_stack, repo_path, description, created_at)`.
+
+**contexts** — the knowledge entries. `(id, project_id → projects, title, content, category, tags, language, file_path, importance 1-10, times_used, created_at, updated_at, deleted_at)`. The `deleted_at` column implements soft-delete: all standard read paths (`searchContexts`, `getContextById`, `listProjects.context_count`, `getHubStats`) filter it out by default.
+
+**contexts_fts** — FTS5 virtual table shadowing `contexts` (title, content, tags, category). Kept in sync by `AFTER INSERT / AFTER UPDATE / AFTER DELETE` triggers. BM25 column weights: title × 10, tags × 5, category × 3, content × 1.
+
+**context_history** — append-only audit table. A `BEFORE UPDATE` trigger on `contexts` inserts the old row here whenever `title`, `content`, `category`, `tags`, or `importance` actually changes. `times_used` bumps and `deleted_at` transitions do **not** create history rows.
+
+**sessions** — coding session log. `(id, project_id, summary, contexts_used JSON, outcome, created_at)`. Matched with a simple LIKE query in `search_sessions` (no FTS index — the table is expected to stay small).
+
+## Migrations
+
+Schema is idempotent via `CREATE TABLE IF NOT EXISTS`. For column-level additions to existing databases (e.g. `deleted_at` was added in 0.1.0), `initDb()` runs `applyMigrations()` which reads `PRAGMA table_info(contexts)` and issues `ALTER TABLE … ADD COLUMN` for anything missing. This means an existing `~/.dev-memory/context.db` created with an older build opens cleanly — no manual migration step.
 
 ## Project Structure
 

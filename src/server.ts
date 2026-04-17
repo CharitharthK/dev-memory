@@ -13,6 +13,15 @@ import {
   UpdateProjectSchema,
   LogSessionSchema,
   ScanProjectSchema,
+  RestoreContextSchema,
+  PurgeContextSchema,
+  EmptyTrashSchema,
+  ListHistorySchema,
+  ExportHubSchema,
+  ImportHubSchema,
+  RelatedContextSchema,
+  SearchSessionsSchema,
+  PruneUnusedSchema,
 } from "./types.js";
 import { searchHandler, getContextHandler } from "./tools/search.js";
 import { saveHandler, updateHandler, deleteHandler } from "./tools/save.js";
@@ -21,15 +30,25 @@ import {
   updateProjectHandler,
 } from "./tools/projects.js";
 import { getHubStatsHandler } from "./tools/stats.js";
-import { logSessionHandler } from "./tools/sessions.js";
+import { logSessionHandler, searchSessionsHandler } from "./tools/sessions.js";
 import { scanProjectHandler } from "./tools/scan.js";
+import {
+  restoreHandler,
+  purgeHandler,
+  emptyTrashHandler,
+  listTrashHandler,
+} from "./tools/trash.js";
+import { listHistoryHandler } from "./tools/history.js";
+import { exportHandler, importHandler } from "./tools/backup.js";
+import { relatedHandler } from "./tools/related.js";
+import { pruneUnusedHandler } from "./tools/prune.js";
 
 /**
  * Creates and configures the McpServer with all tools registered.
  * Exported for integration testing.
  */
 export function createServer(db: Database.Database): McpServer {
-  const server = new McpServer({ name: "dev-memory", version: "2.0.0" });
+  const server = new McpServer({ name: "dev-memory", version: "0.1.0" });
 
   // ── Search & Retrieve ──────────────────────────────────────────────
 
@@ -111,6 +130,88 @@ export function createServer(db: Database.Database): McpServer {
     (params) => scanProjectHandler(params as Record<string, unknown>)
   );
 
+  // ── Trash & recovery ───────────────────────────────────────────────
+
+  server.tool(
+    "list_trash",
+    "List soft-deleted context entries (most recent first). Use restore_context(id) or purge_context(id).",
+    {},
+    (_params) => listTrashHandler({}, db)
+  );
+
+  server.tool(
+    "restore_context",
+    "Restore a soft-deleted context entry from the trash.",
+    RestoreContextSchema.shape,
+    (params) => restoreHandler(params as Record<string, unknown>, db)
+  );
+
+  server.tool(
+    "purge_context",
+    "Permanently delete a context entry (and its history). Bypasses the trash — not recoverable.",
+    PurgeContextSchema.shape,
+    (params) => purgeHandler(params as Record<string, unknown>, db)
+  );
+
+  server.tool(
+    "empty_trash",
+    "Permanently delete all trashed entries older than `older_than_days` (default 0 = all).",
+    EmptyTrashSchema.shape,
+    (params) => emptyTrashHandler(params as Record<string, unknown>, db)
+  );
+
+  // ── History ────────────────────────────────────────────────────────
+
+  server.tool(
+    "list_history",
+    "List the edit history of a context entry (newest revision first). Shows how a decision or note has evolved.",
+    ListHistorySchema.shape,
+    (params) => listHistoryHandler(params as Record<string, unknown>, db)
+  );
+
+  // ── Backup / Import ────────────────────────────────────────────────
+
+  server.tool(
+    "export_hub",
+    "Write the full hub to a JSON file (projects, contexts, sessions). Use for backup, migration, or sharing across machines.",
+    ExportHubSchema.shape,
+    (params) => exportHandler(params as Record<string, unknown>, db)
+  );
+
+  server.tool(
+    "import_hub",
+    "Load a hub export from a JSON file. `mode: 'merge'` (default) keeps existing data; `mode: 'replace'` wipes first.",
+    ImportHubSchema.shape,
+    (params) => importHandler(params as Record<string, unknown>, db)
+  );
+
+  // ── Relations ──────────────────────────────────────────────────────
+
+  server.tool(
+    "related_context",
+    "Find contexts related to a given entry by shared tags, project, or category. Useful for impact tracing and mental-context rebuild.",
+    RelatedContextSchema.shape,
+    (params) => relatedHandler(params as Record<string, unknown>, db)
+  );
+
+  // ── Sessions search ────────────────────────────────────────────────
+
+  server.tool(
+    "search_sessions",
+    "Search logged sessions by summary/outcome substring. Helps with meeting prep and rebuilding recent project context.",
+    SearchSessionsSchema.shape,
+    (params) => searchSessionsHandler(params as Record<string, unknown>, db)
+  );
+
+  // ── Data hygiene ───────────────────────────────────────────────────
+
+  server.tool(
+    "prune_unused",
+    "Find or soft-delete entries with times_used=0 older than N days. Defaults to a dry-run; pass apply:true to soft-delete.",
+    PruneUnusedSchema.shape,
+    (params) => pruneUnusedHandler(params as Record<string, unknown>, db)
+  );
+
   return server;
 }
 
@@ -119,7 +220,8 @@ async function main(): Promise<void> {
   const server = createServer(db);
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("dev-memory v2 server started on STDIO transport");
+  // stderr is safe — stdout is reserved for JSON-RPC frames
+  console.error("dev-memory MCP server ready (STDIO transport)");
 }
 
 main().catch((err) => {

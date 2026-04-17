@@ -20,6 +20,7 @@ export interface ContextRow {
   times_used: number;
   created_at: string;
   updated_at: string;
+  deleted_at: string | null;
   project_name: string;
 }
 
@@ -180,4 +181,74 @@ export interface ScanResult {
   directory_summary: string;
   findings: ScanFinding[];
 }
+
+// ── Trash & history ──────────────────────────────────────────────────
+
+export const RestoreContextSchema = z.object({
+  id: z.number().int().positive(),
+});
+export type RestoreContextInput = z.infer<typeof RestoreContextSchema>;
+
+export const PurgeContextSchema = z.object({
+  id: z.number().int().positive(),
+});
+export type PurgeContextInput = z.infer<typeof PurgeContextSchema>;
+
+export const EmptyTrashSchema = z.object({
+  /** Only purge entries that were soft-deleted more than N days ago. */
+  older_than_days: z.number().int().nonnegative().optional().default(0),
+});
+export type EmptyTrashInput = z.infer<typeof EmptyTrashSchema>;
+
+export const ListHistorySchema = z.object({
+  id: z.number().int().positive(),
+});
+export type ListHistoryInput = z.infer<typeof ListHistorySchema>;
+
+// ── Backup / restore ─────────────────────────────────────────────────
+
+export const ExportHubSchema = z.object({
+  /** Destination file path. Defaults to ./dev-memory-export.json in CWD. */
+  file_path: z.string().min(1).optional(),
+  /** Include soft-deleted entries. Default false. */
+  include_deleted: z.boolean().optional().default(false),
+});
+export type ExportHubInput = z.infer<typeof ExportHubSchema>;
+
+export const ImportHubSchema = z.object({
+  file_path: z.string().min(1),
+  /**
+   * `merge` (default) keeps existing data and inserts entries from the
+   * export as new rows. `replace` wipes the hub first.
+   */
+  mode: z.enum(["merge", "replace"]).optional().default("merge"),
+});
+export type ImportHubInput = z.infer<typeof ImportHubSchema>;
+
+// ── Relations ────────────────────────────────────────────────────────
+
+export const RelatedContextSchema = z.object({
+  id: z.number().int().positive(),
+  limit: z.number().int().positive().optional().default(5),
+});
+export type RelatedContextInput = z.infer<typeof RelatedContextSchema>;
+
+// ── Sessions search / list ───────────────────────────────────────────
+
+export const SearchSessionsSchema = z.object({
+  query: z.string().optional(),
+  project_name: z.string().optional(),
+  limit: z.number().int().positive().optional().default(20),
+});
+export type SearchSessionsInput = z.infer<typeof SearchSessionsSchema>;
+
+// ── Prune ────────────────────────────────────────────────────────────
+
+export const PruneUnusedSchema = z.object({
+  /** Only flag entries with times_used === 0 older than this. */
+  older_than_days: z.number().int().positive().optional().default(90),
+  /** When true, soft-deletes flagged entries. When false (default), returns them for review. */
+  apply: z.boolean().optional().default(false),
+});
+export type PruneUnusedInput = z.infer<typeof PruneUnusedSchema>;
 
